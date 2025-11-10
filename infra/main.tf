@@ -15,7 +15,8 @@ terraform {
   }
   required_version = ">= 0.13"
 }
-@@ -12,6 +20,16 @@ provider "yandex" {
+
+provider "yandex" {
   zone = "ru-central1-a"
 }
 
@@ -32,7 +33,34 @@ data "archive_file" "function_zip" {
 # Create serverless function with full configuration
 resource "yandex_function" "telegram_bot" {
   name               = "telegram-bot"
-@@ -32,11 +50,11 @@ resource "yandex_function" "telegram_bot" {
+  description        = "Telegram bot function with Vision OCR (vvot00)"
+  folder_id          = var.folder_id
+  runtime            = "python311"
+  entrypoint         = "main.handler"
+  memory             = 1024  # Increased for image processing
+  execution_timeout  = 60   # Increased timeout for image processing
+  service_account_id = null
+
+  # environment = {
+  #   TELEGRAM_BOT_TOKEN = var.telegram_bot_token
+  #   YC_API_KEY         = var.yc_api_key
+  #   FOLDER_ID          = var.folder_id
+  #   MODEL_URI          = "gpt://${var.folder_id}/yandexgpt-lite"
+  #   VISION_API_KEY     = var.yc_api_key  # New environment variable
+  # }
+  environment = {
+    TELEGRAM_BOT_TOKEN = var.telegram_bot_token
+    YC_API_KEY         = var.yc_api_key
+    FOLDER_ID          = var.folder_id
+    MODEL_URI          = "gpt://${var.folder_id}/yandexgpt-lite"
+    VISION_API_KEY     = var.yc_api_key
+
+    # Storage credentials + object info for the function to read instructions
+    STORAGE_ACCESS_KEY = var.s3_access_key
+    STORAGE_SECRET_KEY = var.s3_secret_key
+    STORAGE_ENDPOINT   = var.s3_endpoint
+    STORAGE_BUCKET     = yandex_storage_bucket.bot_docs.bucket
+    STORAGE_OBJECT_KEY = var.instruction_object_key
   }
 
   content {
@@ -40,11 +68,39 @@ resource "yandex_function" "telegram_bot" {
   }
 
   user_hash = filesha256(data.archive_file.function_zip.output_path)
-  depends_on = [data.archive_file.function_zip]
+  # depends_on = [data.archive_file.function_zip]
+  depends_on = [data.archive_file.function_zip, yandex_storage_object.instruction_file]
+
 }
 
 # Grant public invoke rights (needed for API Gateway and Telegram)
-@@ -70,4 +88,24 @@ EOF
+resource "yandex_function_iam_binding" "invoker_public" {
+  function_id = yandex_function.telegram_bot.id
+  role        = "serverless.functions.invoker"
+  members     = ["system:allUsers"]
+}
+
+resource "yandex_api_gateway" "tg_gateway" {
+  name        = "telegram-bot-gateway"
+  description = "API Gateway для приема webhook от Telegram"
+  folder_id   = var.folder_id
+
+  spec = <<EOF
+openapi: 3.0.0
+info:
+  title: Telegram Bot Webhook
+  version: 1.0.0
+paths:
+  /webhook/${var.webhook_path_suffix}:
+    post:
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: ${yandex_function.telegram_bot.id}
+      responses:
+        '200':
+          description: OK
+EOF
+}
 
 output "webhook_url" {
   value = "https://${yandex_api_gateway.tg_gateway.domain}/webhook/${var.webhook_path_suffix}"
@@ -67,4 +123,20 @@ data "http" "telegram_webhook_register" {
   request_headers = {
     "Content-Type" = "application/json"
   }
+}
+
+
+resource "yandex_storage_bucket" "bot_docs" {
+  bucket     = var.instruction_bucket_name
+  acl        = "private" # prefer private; we'll fetch with credentials
+  folder_id  = var.folder_id
+  # optionally website / other settings
+}
+
+resource "yandex_storage_object" "instruction_file" {
+  bucket      = yandex_storage_bucket.bot_docs.bucket
+  key         = var.instruction_object_key
+  source      = "${path.module}/yandexgpt_instructions.json"
+  content_type = "application/json"
+  acl         = "private"
 }

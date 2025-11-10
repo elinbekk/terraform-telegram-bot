@@ -37,3 +37,33 @@ variable "function_zip_path" {
   type        = string
   default     = "../function.zip"
 }
+
+variable "s3_access_key" {
+  description = "Access key for Object Storage (S3)"
+  type        = string
+  sensitive   = true
+}
+
+variable "s3_secret_key" {
+  description = "Secret key for Object Storage (S3)"
+  type        = string
+  sensitive   = true
+}
+
+variable "s3_endpoint" {
+  description = "S3 endpoint (default: https://storage.yandexcloud.net)"
+  type        = string
+  default     = "https://storage.yandexcloud.net"
+}
+
+variable "instruction_object_key" {
+  description = "Key (path) for the instructions file in the bucket"
+  type        = string
+  default     = "yandexgpt_instructions.json"
+}
+
+variable "instruction_bucket_name" {
+  description = "Name of bucket to store instructions"
+  type        = string
+  default     = "" # set in terraform.tfvars
+}
