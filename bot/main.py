@@ -1,3 +1,4 @@
+import os
 import json
 import requests
 import base64
@@ -7,9 +8,22 @@ from botocore.config import Config
 
 _INSTRUCTIONS: Optional[Dict[str, Any]] = None
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
-@@ -23,6 +27,54 @@
+FOLDER_ID = os.getenv("FOLDER_ID")
+MODEL_URI = os.getenv("MODEL_URI", f"gpt://{FOLDER_ID}/yandexgpt-lite")
+VISION_API_KEY = os.getenv("VISION_API_KEY")
+
+TG_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+YANDEX_GPT_URL = "https://llm.api.cloud.yandex.net/foundationModels/v1/completion"
+YANDEX_VISION_URL = "https://vision.api.cloud.yandex.net/vision/v1/batchAnalyze"
+
+# Global commands responses
+START_RESPONSE = "Я помогу ответить на экзаменационный вопрос по «Операционным системам».\nПрисылайте вопрос — фото или текстом."
+HELP_RESPONSE = START_RESPONSE
+NON_QUESTION_RESPONSE = "Я не могу понять вопрос.\nПришлите экзаменационный вопрос по «Операционным системам» — фото или текстом."
+GENERATION_ERROR_RESPONSE = "Я не смог подготовить ответ на экзаменационный вопрос."
+MULTIPLE_PHOTOS_RESPONSE = "Я могу обработать только одну фотографию."
 PHOTO_PROCESSING_ERROR_RESPONSE = "Я не могу обработать эту фотографию."
 UNSUPPORTED_MESSAGE_RESPONSE = "Я могу обработать только текстовое сообщение или фотографию."
 
@@ -64,11 +78,18 @@ def load_instructions_from_s3() -> Dict[str, Any]:
 def get_telegram_file_url(file_id: str) -> str:
     """Get direct URL for Telegram file"""
     response = requests.get(f"{TG_API}/getFile?file_id={file_id}", timeout=10)
-@@ -36,14 +88,12 @@ def download_photo_from_telegram(file_id: str) -> bytes:
+    response.raise_for_status()
+    file_path = response.json()["result"]["file_path"]
+    return f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{file_path}"
+
+
+
+def download_photo_from_telegram(file_id: str) -> bytes:
+    """Download photo from Telegram and return as bytes"""
+    file_url = get_telegram_file_url(file_id)
     response = requests.get(file_url, timeout=30)
     response.raise_for_status()
     return response.content
-
 def process_photo_with_vision(image_data: bytes) -> str:
     """Extract text from photo using Yandex Vision OCR (robust version)"""
     if not VISION_API_KEY:
@@ -76,10 +97,14 @@ def process_photo_with_vision(image_data: bytes) -> str:
 
     image_content = base64.b64encode(image_data).decode("utf-8")
 
-
     headers = {
         "Authorization": f"Api-Key {VISION_API_KEY}",
-@@ -56,7 +106,7 @@ def process_photo_with_vision(image_data: bytes) -> str:
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "folderId": FOLDER_ID,
+        "analyze_specs": [{
             "features": [{
                 "type": "TEXT_DETECTION",
                 "text_detection_config": {
@@ -87,11 +112,12 @@ def process_photo_with_vision(image_data: bytes) -> str:
                 }
             }],
             "mimeType": "image/jpeg",
-@@ -66,21 +116,43 @@ def process_photo_with_vision(image_data: bytes) -> str:
+            "content": image_content
+        }]
+    }
 
     response = requests.post(YANDEX_VISION_URL, headers=headers, json=payload, timeout=30)
     response.raise_for_status()
-
     result = response.json()
 
     # --- Clean debug output (truncated for readability) ---
@@ -106,12 +132,11 @@ def process_photo_with_vision(image_data: bytes) -> str:
 
     try:
         vision_results = result["results"][0]["results"][0]["textDetection"]
-
-        # ✅ 1. Prefer full text if available (modern API)
+        
         if "fullText" in vision_results:
             return vision_results["fullText"].strip()
 
-        # ✅ 2. Otherwise, collect text from words
+      
         pages = vision_results.get("pages", [])
         extracted_lines = []
 
@@ -127,12 +152,23 @@ def process_photo_with_vision(image_data: bytes) -> str:
         return extracted_text
 
     except (KeyError, IndexError, TypeError) as e:
-        print("⚠️ Unexpected Vision API structure:")
+        print("Unexpected Vision API structure:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         raise Exception("Failed to extract text from Vision response") from e
 
 def classify_question(text: str) -> bool:
-@@ -99,8 +171,10 @@ def classify_question(text: str) -> bool:
+    """Determine if text is an exam question about Operating Systems"""
+    # Simple keyword-based classification (can be enhanced with YandexGPT)
+    question_indicators = ["?", "вопрос", "объясните", "расскажите", "что такое", "как", "почему"]
+    os_keywords = ["операционная система", "ОС", "процесс", "поток", "память",
+                   "файловая система", "deadlock", "взаимное исключение", "синхронизация",
+                   "виртуальная память", "планирование", "диспетчеризация"]
+
+    text_lower = text.lower()
+
+    # Check if it contains question indicators and OS-related terms
+    has_question = any(indicator in text_lower for indicator in question_indicators)
+    has_os_content = any(keyword in text_lower for keyword in os_keywords)
 
     return has_question and has_os_content
 
@@ -143,7 +179,9 @@ def call_yandex_gpt(messages: list, max_tokens: int = 500, temperature: float = 
     headers = {
         "Authorization": f"Api-Key {YC_API_KEY}",
         "Content-Type": "application/json",
-@@ -110,19 +184,10 @@ def generate_reply_from_yandex_gpt(user_text: str) -> str:
+    }
+
+    payload = {
         "modelUri": MODEL_URI,
         "completionOptions": {
             "stream": False,
@@ -151,23 +189,16 @@ def call_yandex_gpt(messages: list, max_tokens: int = 500, temperature: float = 
             "maxTokens": max_tokens
         },
         "messages": messages
-
-
-
-
-
-
-
-
-
     }
 
     resp = requests.post(YANDEX_GPT_URL, headers=headers, json=payload, timeout=30)
-@@ -133,9 +198,113 @@ def generate_reply_from_yandex_gpt(user_text: str) -> str:
+    resp.raise_for_status()
+    data = resp.json()
+
+    result = data.get("result", {})
     alts = result.get("alternatives", [])
     if not alts:
         raise Exception("No alternatives in response")
-
     message = alts[0].get("message", {})
     return message.get("text", "")
 
@@ -278,11 +309,11 @@ def classify_with_yandex_gpt(text: str) -> Tuple[bool, Optional[str]]:
 
 def send_telegram_message(chat_id: int, text: str):
     """Send message to Telegram"""
-@@ -144,49 +313,82 @@ def send_telegram_message(chat_id: int, text: str):
+    payload = {"chat_id": chat_id, "text": text}
+    r = requests.post(f"{TG_API}/sendMessage", json=payload, timeout=15)
     r.raise_for_status()
 
 def handle_text_message(text: str, chat_id: int):
-
     if text.startswith("/start") or text.startswith("/help"):
         send_telegram_message(chat_id, START_RESPONSE)
         return
@@ -295,7 +326,6 @@ def handle_text_message(text: str, chat_id: int):
         is_q = False
 
     if not is_q:
-
         send_telegram_message(chat_id, NON_QUESTION_RESPONSE)
         return
 
@@ -308,10 +338,6 @@ def handle_text_message(text: str, chat_id: int):
         send_telegram_message(chat_id, GENERATION_ERROR_RESPONSE)
 def handle_photo_message(photos: list, chat_id: int):
     """Process photo message with debugging — sends all received photos back."""
-
-
-
-
     try:
         # Telegram sends multiple photo sizes for one image
         count = len(photos)
@@ -352,7 +378,7 @@ def handle_photo_message(photos: list, chat_id: int):
         extracted_text = process_photo_with_vision(image_data)
 
         if not extracted_text:
-            send_telegram_message(chat_id, "⚠️ Не удалось распознать текст на фотографии.")
+            send_telegram_message(chat_id, "⚠️Не удалось распознать текст на фотографии.")
             return
 
         # Send extracted text for verification
@@ -367,3 +393,31 @@ def handle_photo_message(photos: list, chat_id: int):
 
 def handler(event, context):
     """Main handler function"""
+    try:
+        body = event.get("body")
+        update = json.loads(body) if isinstance(body, str) else body
+    except Exception as e:
+        print(f"JSON parsing error: {e}")
+        return {"statusCode": 400, "body": "Bad request"}
+
+    message = update.get("message") or update.get("edited_message")
+    if not message:
+        return {"statusCode": 200, "body": "No message to handle"}
+
+    chat_id = message["chat"]["id"]
+
+    try:
+        if "text" in message:
+            handle_text_message(message["text"], chat_id)
+
+        elif "photo" in message:
+            handle_photo_message(message["photo"], chat_id)
+
+        else:
+            send_telegram_message(chat_id, UNSUPPORTED_MESSAGE_RESPONSE)
+
+    except Exception as e:
+        print(f"Handler error: {e}")
+        send_telegram_message(chat_id, "Произошла ошибка при обработке сообщения.")
+
+    return {"statusCode": 200, "body": "ok"}
