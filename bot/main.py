@@ -90,6 +90,8 @@ def download_photo_from_telegram(file_id: str) -> bytes:
     response = requests.get(file_url, timeout=30)
     response.raise_for_status()
     return response.content
+
+
 def process_photo_with_vision(image_data: bytes) -> str:
     """Extract text from photo using Yandex Vision OCR (robust version)"""
     if not VISION_API_KEY:
@@ -126,7 +128,7 @@ def process_photo_with_vision(image_data: bytes) -> str:
         num_pages = len(result["results"][0]["results"][0]["textDetection"]["pages"])
         print(f"📄 Pages detected: {num_pages}")
     except Exception:
-        print("⚠️ Could not count pages, raw JSON structure unexpected.")
+        print(" Could not count pages, raw JSON structure unexpected.")
     # Optional: print only the first 500 chars of JSON for readability
     print(json.dumps(result, indent=2, ensure_ascii=False)[:500] + "...\n")
 
@@ -155,6 +157,7 @@ def process_photo_with_vision(image_data: bytes) -> str:
         print("Unexpected Vision API structure:")
         print(json.dumps(result, indent=2, ensure_ascii=False))
         raise Exception("Failed to extract text from Vision response") from e
+
 
 def classify_question(text: str) -> bool:
     """Determine if text is an exam question about Operating Systems"""
@@ -207,13 +210,14 @@ def generate_answer_via_yandex_gpt(question_text: str) -> str:
     gen_template = instructions.get("generation_prompt",
                                     "You are an expert in Operating Systems. Answer the exam question concisely. Question: {{QUESTION}}")
     prompt = gen_template.replace("{{QUESTION}}", question_text)
-
+    print("PROMT===============", prompt)
     messages = [
         {"role": "system", "text": "You are an expert in Operating Systems. Answer exam questions concisely and in Russian. Format: short heading, bullet points, concise explanation."},
         {"role": "user", "text": prompt}
     ]
 
     return call_yandex_gpt(messages, max_tokens=800, temperature=0.25)
+
 
 
 def simple_keyword_classify(text: str) -> bool:
@@ -246,6 +250,16 @@ def classify_with_yandex_gpt(text: str) -> Tuple[bool, Optional[str]]:
         resp_text = call_yandex_gpt(messages, max_tokens=150, temperature=0.0)
         # Try to find JSON inside resp_text
         # Some LLMs wrap with backticks - attempt robust parse
+        resp_text = resp_text.strip()
+        
+        # Дополнительная очистка JSON
+        if resp_text.startswith("```json"):
+            resp_text = resp_text[7:]
+        if resp_text.endswith("```"):
+            resp_text = resp_text[:-3]
+        resp_text = resp_text.strip()
+        
+        print(f"[DEBUG] GPT Classification response: {resp_text}")
         try:
             # if response is exactly JSON, parse directly
             parsed = json.loads(resp_text)
@@ -275,14 +289,28 @@ def send_telegram_message(chat_id: int, text: str):
     r = requests.post(f"{TG_API}/sendMessage", json=payload, timeout=15)
     r.raise_for_status()
 
+import re
+
+def normalize_question(text: str) -> str:
+    lines = text.splitlines()
+    out = []
+
+    for i, line in enumerate(lines):
+        if i > 0 and re.match(r'\s*\d+[\.\)]', line) and not re.match(r'\s*1[\.\)]', line):
+            out.append("")
+        out.append(line)
+
+    return "\n".join(out)
+
 def handle_text_message(text: str, chat_id: int):
     if text.startswith("/start") or text.startswith("/help"):
         send_telegram_message(chat_id, START_RESPONSE)
         return
-
+    
+    norm = normalize_question(text)
     # Use YandexGPT classifier
     try:
-        is_q, explanation = classify_with_yandex_gpt(text)
+        is_q, explanation = classify_with_yandex_gpt(norm)
     except Exception as e:
         print(f"Classifier exception: {e}")
         is_q = False
@@ -318,11 +346,11 @@ def handle_photo_message(photos: list, chat_id: int):
             return
 
         # Send extracted text for verification
-        send_telegram_message(chat_id, f"🧾 Распознанный текст:\n\n{extracted_text[:4000]}")
-
+        send_telegram_message(chat_id, f"Распознанный текст:\n\n{extracted_text[:4000]}")
+        handle_text_message(extracted_text, chat_id)
     except Exception as e:
         print(f"Photo processing error: {e}")
-        send_telegram_message(chat_id, f"❌ Ошибка обработки фото: {e}")
+        send_telegram_message(chat_id, f" Ошибка обработки фото: {e}")
 
 def handler(event, context):
     """Main handler function"""
