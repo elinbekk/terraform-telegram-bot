@@ -8,7 +8,7 @@ from botocore.config import Config
 
 _INSTRUCTIONS: Optional[Dict[str, Any]] = None
 
-TELEGRAM_BOT_TOKEN = os.getenv("TG_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 YC_API_KEY = os.getenv("YC_API_KEY")
 FOLDER_ID = os.getenv("FOLDER_ID")
 MODEL_URI = os.getenv("MODEL_URI", f"gpt://{FOLDER_ID}/yandexgpt-lite")
@@ -121,7 +121,7 @@ def process_photo_with_vision(image_data: bytes) -> str:
     result = response.json()
 
     # --- Clean debug output (truncated for readability) ---
-    print("🧩 [DEBUG] Vision response summary:")
+    print(" [DEBUG] Vision response summary:")
     try:
         num_pages = len(result["results"][0]["results"][0]["textDetection"]["pages"])
         print(f"📄 Pages detected: {num_pages}")
@@ -215,44 +215,6 @@ def generate_answer_via_yandex_gpt(question_text: str) -> str:
 
     return call_yandex_gpt(messages, max_tokens=800, temperature=0.25)
 
-#
-# def generate_reply_from_yandex_gpt(user_text: str) -> str:
-#     """Generate answer using YandexGPT"""
-#     headers = {
-#         "Authorization": f"Api-Key {YC_API_KEY}",
-#         "Content-Type": "application/json",
-#     }
-#
-#     payload = {
-#         "modelUri": MODEL_URI,
-#         "completionOptions": {
-#             "stream": False,
-#             "temperature": 0.3,
-#             "maxTokens": 800
-#         },
-#         "messages": [
-#             {
-#                 "role": "system",
-#                 "text": "Ты эксперт по операционным системам. Отвечай кратко и по существу на экзаменационные вопросы. Форматируй ответ четко и структурированно."
-#             },
-#             {
-#                 "role": "user",
-#                 "text": f"Ответь на следующий вопрос по операционным системам: {user_text}"
-#             }
-#         ]
-#     }
-#
-#     resp = requests.post(YANDEX_GPT_URL, headers=headers, json=payload, timeout=30)
-#     resp.raise_for_status()
-#     data = resp.json()
-#
-#     result = data.get("result", {})
-#     alts = result.get("alternatives", [])
-#     if not alts:
-#         raise Exception("No alternatives in response")
-#
-#     message = alts[0].get("message", {})
-#     return message.get("text", GENERATION_ERROR_RESPONSE)
 
 def simple_keyword_classify(text: str) -> bool:
     question_indicators = ["?", "вопрос", "объясните", "расскажите", "что такое", "как", "почему"]
@@ -336,39 +298,13 @@ def handle_text_message(text: str, chat_id: int):
     except Exception as e:
         print(f"GPT generation error: {e}")
         send_telegram_message(chat_id, GENERATION_ERROR_RESPONSE)
+
 def handle_photo_message(photos: list, chat_id: int):
     """Process photo message with debugging — sends all received photos back."""
     try:
-        # Telegram sends multiple photo sizes for one image
-        count = len(photos)
-        send_telegram_message(chat_id, f"📸 Получено {count} изображений от Telegram (разные размеры).")
-
-        for idx, photo in enumerate(photos):
-            file_id = photo["file_id"]
-            width = photo.get("width")
-            height = photo.get("height")
-            size = photo.get("file_size")
-
-            # Log info
-            print(f"[DEBUG] Photo #{idx+1}: file_id={file_id}, {width}x{height}, size={size}")
-
-            # Send file info to user
-            send_telegram_message(
-                chat_id,
-                f"🖼 Фото #{idx+1} — {width}x{height}, file_id={file_id}, size={size}"
-            )
-
-            # Re-send each version of the photo back to user
-            requests.post(
-                f"{TG_API}/sendPhoto",
-                data={"chat_id": chat_id, "photo": file_id},
-                timeout=10
-            )
-
-        # Use the largest photo (last in the list)
         photo = photos[-1]
         file_id = photo["file_id"]
-        send_telegram_message(chat_id, f"✅ Использую последнее фото (file_id={file_id}) для OCR.")
+        send_telegram_message(chat_id, f"Использую фото (file_id={file_id}) для OCR.")
 
         # Download full image
         image_data = download_photo_from_telegram(file_id)
@@ -383,9 +319,6 @@ def handle_photo_message(photos: list, chat_id: int):
 
         # Send extracted text for verification
         send_telegram_message(chat_id, f"🧾 Распознанный текст:\n\n{extracted_text[:4000]}")
-
-        # Process extracted text as regular text message
-        handle_text_message(extracted_text, chat_id)
 
     except Exception as e:
         print(f"Photo processing error: {e}")
